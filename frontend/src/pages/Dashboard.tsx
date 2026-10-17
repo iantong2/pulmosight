@@ -6,6 +6,7 @@ import { FileUpload } from "@/components/FileUpload";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { mockPatients } from "@/data/mockPatients";
+import { apiUrl, readErrorMessage } from "@/lib/api";
 import { Patient } from "@/types/patient";
 import { Search, LogOut, Play, User, Calendar, FileText } from "lucide-react";
 
@@ -36,13 +37,8 @@ const Dashboard = () => {
     setIsStarting(true);
 
     try {
-      const allowed = [".dcm", ".zip", ".nii", ".nii.gz"];
-      const lowerName = selectedFile.name.toLowerCase();
-      const isAllowed = allowed.some((ext) => lowerName.endsWith(ext));
-      if (!isAllowed) {
-        throw new Error(
-          "Unsupported file type. Please upload DICOM/ZIP/NIfTI.",
-        );
+      if (!selectedFile.name.toLowerCase().endsWith(".dcm")) {
+        throw new Error("Unsupported file type. Please upload a DICOM (.dcm) file.");
       }
 
       const formData = new FormData();
@@ -52,17 +48,13 @@ const Dashboard = () => {
       formData.append("age", String(selectedPatient.age));
       formData.append("gender", selectedPatient.gender);
 
-      const res = await fetch(
-        `${import.meta.env.VITE_API_BASE_URL}/api/analysis/start`,
-        {
-          method: "POST",
-          body: formData,
-        },
-      );
+      const res = await fetch(apiUrl("/api/analysis/start"), {
+        method: "POST",
+        body: formData,
+      });
 
       if (!res.ok) {
-        const msg = await res.text();
-        throw new Error(msg || `Upload failed (${res.status})`);
+        throw new Error(await readErrorMessage(res, "Upload failed"));
       }
 
       const data: { jobId?: string } = await res.json();

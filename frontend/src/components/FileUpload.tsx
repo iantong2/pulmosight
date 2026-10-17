@@ -33,7 +33,7 @@ export const FileUpload = ({
 
       if (e.dataTransfer.files && e.dataTransfer.files[0]) {
         const file = e.dataTransfer.files[0];
-        if (file.type.startsWith("image/") || file.name.endsWith(".dcm")) {
+        if (file.name.toLowerCase().endsWith(".dcm")) {
           onFileSelect(file);
         }
       }
@@ -88,7 +88,7 @@ export const FileUpload = ({
     >
       <input
         type="file"
-        accept="image/*,.dcm"
+        accept=".dcm"
         onChange={handleChange}
         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
       />
@@ -110,7 +110,7 @@ export const FileUpload = ({
             {isDragging ? "Drop CT scan here" : "Drag & drop CT scan"}
           </p>
           <p className="text-sm text-muted-foreground mt-1">
-            or click to browse files (DICOM, PNG, JPG)
+            or click to browse (DICOM .dcm)
           </p>
         </div>
       </div>

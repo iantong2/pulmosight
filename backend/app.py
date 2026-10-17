@@ -3,9 +3,10 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-import uuid, os, subprocess, sys, json
+import uuid, os, subprocess, sys, json, re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from config import (
     CLASSIFICATION_API_URL,
@@ -16,11 +17,15 @@ from config import (
     MODEL_API_RETRY_BACKOFF_SEC,
 )
 from database import (
+    accept_referral,
     fetch_analysis_detail,
     fetch_history,
+    fetch_referral,
+    fetch_referrals,
     initialize_db,
     save_analysis_result,
     upsert_patient,
+    upsert_referral,
     upsert_scan_job,
 )
 from run_local_medsam_infer import app as segmentation_app
@@ -53,6 +58,25 @@ def _status_path(job_dir: Path) -> Path:
     return job_dir / "status.json"
 
 
+_JOB_ID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _resolve_job_dir(job_id: str) -> Path:
+    """Map a job id to its directory, rejecting anything that is not a UUID.
+
+    Job ids arrive from the URL, and on Windows a backslash in the value is a
+    directory separator: `..%5Capp.db` used to resolve outside UPLOAD_DIR and
+    turn these endpoints into a filesystem oracle. Only ids we generated
+    (uuid4) are accepted.
+    """
+    if not isinstance(job_id, str) or not _JOB_ID_PATTERN.fullmatch(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job id")
+    return UPLOAD_DIR / job_id
+
+
 def _result_path(job_dir: Path) -> Path:
     return job_dir / "result.json"
 
@@ -81,11 +105,21 @@ async def _start_analysis_job(
     gender: str,
 ):
     job_id = str(uuid.uuid4())
-    job_dir = UPLOAD_DIR / job_id
+
+    safe_name = Path(ctScan.filename or "upload.bin").name
+    # The local inference pipeline only reads single-slice DICOM files. Reject
+    # anything else up front so the client gets a clear 400 instead of a job
+    # that silently fails in the background.
+    if not safe_name.lower().endswith(".dcm"):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Please upload a DICOM (.dcm) file.",
+        )
+
+    job_dir = _resolve_job_dir(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
     _write_status(job_dir, "pending", stage="queued")
 
-    safe_name = Path(ctScan.filename or "upload.bin").name
     scan_path = job_dir / safe_name
     with open(scan_path, "wb") as f:
         f.write(await ctScan.read())
@@ -164,7 +198,7 @@ async def start_local_analysis(
 
 @app.get("/api/analysis/status/{job_id}")
 async def analysis_status(job_id: str):
-    job_dir = UPLOAD_DIR / job_id
+    job_dir = _resolve_job_dir(job_id)
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -181,7 +215,7 @@ async def analysis_status(job_id: str):
 # ...existing code...
 @app.get("/api/analysis/result/{job_id}")
 async def analysis_result(job_id: str):
-    job_dir = UPLOAD_DIR / job_id
+    job_dir = _resolve_job_dir(job_id)
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -288,8 +322,7 @@ async def history_api():
 
 @app.get("/api/analysis/{job_id}")
 async def analysis_detail_api(job_id: str):
-    """Return the persisted result for a single job, suitable for the detail page route."""
-    job_dir = UPLOAD_DIR / job_id
+    job_dir = _resolve_job_dir(job_id)
     result_path = _result_path(job_dir) if job_dir.exists() else None
     result_data: dict[str, Any] = {}
 
@@ -314,6 +347,24 @@ async def analysis_detail_api(job_id: str):
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
                 meta = {}
+
+    # Report the job's real state. This endpoint used to hardcode "completed",
+    # which made failed or still-running analyses look finished in the UI.
+    status_payload: dict[str, Any] = {}
+    if job_dir.exists():
+        st_path = _status_path(job_dir)
+        if st_path.exists():
+            try:
+                status_payload = json.loads(st_path.read_text(encoding="utf-8"))
+            except Exception:
+                status_payload = {}
+
+    has_result = bool(result_data) or item is not None
+    status = status_payload.get("status") or ("completed" if has_result else "pending")
+    stage = status_payload.get("stage") or (
+        "completed" if status == "completed" else "queued"
+    )
+    error_message = status_payload.get("error")
 
     classification_payload = result_data.get("classification")
     if item is not None and classification_payload is None:
@@ -341,8 +392,9 @@ async def analysis_detail_api(job_id: str):
             "findings": result_data.get("findings") or [],
             "originalScan": result_data.get("originalScan") or "",
             "segmentationImages": result_data.get("segmentationImages") or [],
-            "status": "completed",
-            "stage": "completed",
+            "status": status,
+            "stage": stage,
+            **({"error": error_message} if error_message else {}),
         }
 
     return {
@@ -362,8 +414,9 @@ async def analysis_detail_api(job_id: str):
         "findings": result_data.get("findings") or [],
         "originalScan": result_data.get("originalScan") or "",
         "segmentationImages": result_data.get("segmentationImages") or [],
-        "status": "completed",
-        "stage": "completed",
+        "status": status,
+        "stage": stage,
+        **({"error": error_message} if error_message else {}),
     }
 
 

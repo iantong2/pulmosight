@@ -2,8 +2,10 @@ import { useNavigate, useLocation, useParams } from "react-router-dom";
 import { Logo } from "@/components/Logo";
 import { CTScanViewer } from "@/components/CTScanViewer";
 import { MalignancyChart } from "@/components/MalignancyChart";
+import { MalignancyGauge } from "@/components/MalignancyGauge";
 import { Button } from "@/components/ui/button";
 import { AnalysisResult, Patient } from "@/types/patient";
+import { apiUrl, readErrorMessage } from "@/lib/api";
 import { ArrowLeft, Download, FileText, Layers, Loader2 } from "lucide-react";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { toast } from "@/hooks/use-toast";
@@ -73,6 +75,7 @@ const Analysis = () => {
   const [showSegmentation, setShowSegmentation] = useState(false);
   const [showResultsModal, setShowResultsModal] = useState(false);
   const [isStartingSegmentation, setIsStartingSegmentation] = useState(false);
+  const [referralConfirmed, setReferralConfirmed] = useState(false);
 
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [segmentImages, setSegmentImages] = useState<string[]>([]);
@@ -137,25 +140,31 @@ const Analysis = () => {
     setIsStartingSegmentation(true);
 
     try {
-      const response = await fetch(
-        `${import.meta.env.VITE_API_BASE_URL}/api/segmentation/run`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            jobId,
-            requestId: jobId,
-            analysisId: jobId,
-          }),
+      const response = await fetch(apiUrl("/api/segmentation/run"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-      );
+        body: JSON.stringify({
+          jobId,
+          requestId: jobId,
+          analysisId: jobId,
+        }),
+      });
 
-      const data = await response.json().catch(() => ({}));
+      const raw = await response.text().catch(() => "");
+      let data: { success?: boolean; error?: string } = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = {};
+      }
 
       if (!response.ok || data.success === false) {
-        throw new Error(data.error || "Segmentation could not be started.");
+        throw new Error(
+          data.error ||
+            `Segmentation could not be started. (HTTP ${response.status})`,
+        );
       }
 
       // Close the modal and move the user into the segmentation stage only after
@@ -247,11 +256,11 @@ const Analysis = () => {
 
     const loadFromPersistentApi = async () => {
       try {
-        const res = await fetch(
-          `${import.meta.env.VITE_API_BASE_URL}/api/analysis/${jobId}`,
-        );
+        const res = await fetch(apiUrl(`/api/analysis/${jobId}`));
         if (!res.ok)
-          throw new Error(`Failed to fetch persisted analysis (${res.status})`);
+          throw new Error(
+            await readErrorMessage(res, "Failed to fetch persisted analysis"),
+          );
         const data: ApiAnalysisResponse = await res.json();
 
         if (cancelled) return;
@@ -315,11 +324,13 @@ const Analysis = () => {
       activeController.current = controller;
 
       try {
-        const res = await fetch(
-          `${import.meta.env.VITE_API_BASE_URL}/api/analysis/result/${jobId}`,
-          { signal: controller.signal },
-        );
-        if (!res.ok) throw new Error(`Failed to fetch result (${res.status})`);
+        const res = await fetch(apiUrl(`/api/analysis/result/${jobId}`), {
+          signal: controller.signal,
+        });
+        if (!res.ok)
+          throw new Error(
+            await readErrorMessage(res, "Failed to fetch analysis result"),
+          );
         const data: ApiAnalysisResponse = await res.json();
 
         console.log("[Analysis] raw /result payload:", data);
@@ -434,27 +445,50 @@ const Analysis = () => {
     }, 2000);
   };
 
-  const classificationText = classification
-    ? classification.has_cancer
-      ? "Cancer indicators detected"
-      : "No cancer indicators detected"
-    : "Classification pending";
+  const handleEditResult = () => {
+    toast({
+      title: "Edit result",
+      description: "Result editing is not available yet — nothing was changed.",
+    });
+  };
 
-  const classificationSummaryText = classification
-    ? classification.has_cancer
-      ? "High risk cancer detected"
-      : "Low risk detected"
-    : "Classification pending";
+  const handleConfirmReferral = () => {
+    setReferralConfirmed(true);
+    toast({
+      title: "Referred to corresponding physician",
+      description: "This analysis has been marked as confirmed.",
+    });
+  };
 
-  const classificationDetailText = classification
+  const classificationLabel = classification
+    ? (classification.label ??
+      (classification.has_cancer ? "malignant" : "benign"))
+    : "pending";
+
+  const classificationConfidenceText = classification
+    ? `${Math.round(classification.confidence * 100)}%`
+    : "—";
+
+  const classificationSentence = classification
     ? classification.has_cancer
-      ? "Suggest review in 1–2 weeks."
-      : "Continue routine follow-up and recheck if needed."
+      ? "Cancer detected by classification model."
+      : "No cancer detected by classification model."
     : "Waiting for the classification model to finish evaluating this scan.";
 
   const resultsModalTitle = classification?.has_cancer
     ? "Cancer indicators detected"
     : "No Cancer indicators detected";
+
+  // Reflect the real pipeline state in the page header instead of always
+  // claiming the analysis finished.
+  const headerStatusText =
+    pipelineStage === "complete"
+      ? "Analysis completed"
+      : pipelineStage === "error"
+        ? "Analysis failed"
+        : pipelineStage === "cancelled"
+          ? "Analysis cancelled"
+          : "Analysis in progress";
 
   return (
     <>
@@ -547,7 +581,7 @@ const Analysis = () => {
                   CT Scan Analysis Results
                 </h1>
                 <p className="text-muted-foreground mt-1">
-                  Analysis completed •{" "}
+                  {headerStatusText} •{" "}
                   {new Date().toLocaleDateString("en-US", {
                     year: "numeric",
                     month: "long",
@@ -580,7 +614,10 @@ const Analysis = () => {
               {stageMessage}
             </p>
             <p className="text-sm mt-1 text-muted-foreground">
-              {classificationText}
+              Classification: {classificationLabel}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Confidence: {classificationConfidenceText}
             </p>
             {errorMessage && (
               <div className="mt-3">
@@ -649,19 +686,50 @@ const Analysis = () => {
                 <h2 className="text-lg font-semibold text-foreground mb-4">
                   Analysis Metrics
                 </h2>
-                <div className="mb-4 rounded-lg border border-border bg-card p-4">
-                  <h3 className="text-sm font-semibold text-foreground mb-2">
+
+                <div className="rounded-lg border border-border bg-card p-4 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    Malignancy Score
+                  </p>
+                  <div className="mt-3 flex justify-center">
+                    <MalignancyGauge
+                      score={result?.malignancyScore ?? 0}
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <MalignancyChart result={result ?? emptyAnalysisResult} />
+                </div>
+
+                <div className="mt-4 rounded-lg border border-border bg-card p-4">
+                  <h3 className="text-sm font-medium text-foreground mb-2">
                     Classification Result
                   </h3>
-                  <p className="text-2xl font-bold text-foreground leading-tight">
-                    {classificationSummaryText}
+                  <p className="text-sm text-muted-foreground">
+                    {classificationSentence}
                   </p>
                   <p className="mt-2 text-sm text-muted-foreground">
-                    {classificationDetailText}
+                    Confidence: {classificationConfidenceText}
                   </p>
                 </div>
-                <MalignancyChart result={result ?? emptyAnalysisResult} />
-                <div className="bg-card border border-border rounded-lg p-4">
+
+                <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                  <Button variant="outline" onClick={handleEditResult}>
+                    Edit result
+                  </Button>
+                  <Button
+                    className="sm:flex-1"
+                    onClick={handleConfirmReferral}
+                    disabled={referralConfirmed}
+                  >
+                    {referralConfirmed
+                      ? "Referred to corresponding physician"
+                      : "Confirm and refer to corresponding physicians"}
+                  </Button>
+                </div>
+
+                <div className="mt-4 bg-card border border-border rounded-lg p-4">
                   <h3 className="text-sm font-medium text-foreground mb-3">
                     Coordinate Legend
                   </h3>

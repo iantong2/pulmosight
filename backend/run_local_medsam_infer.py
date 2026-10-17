@@ -1,6 +1,7 @@
 # ...existing code...
 import argparse
 import json
+import re
 import traceback
 from pathlib import Path
 import time
@@ -110,6 +111,22 @@ def _save_outputs(job_dir: Path, img01_resized: np.ndarray, mask_u8: np.ndarray)
 
     return original_path.name, mask_path.name, overlay_path.name
 
+
+def _render_original_preview(job_dir: Path, job_id: str, input_path: Path) -> str:
+    """Render the DICOM slice to original.png and return its public URL.
+
+    Every job needs a scan preview — not just the ones that reach segmentation —
+    otherwise the Original Scan viewer stays blank for negative results.
+    """
+    img01 = _read_dicom_to_img01(input_path)
+    preview = cv2.resize(img01, (512, 512), interpolation=cv2.INTER_LINEAR)
+    preview_u8 = (preview * 255.0).clip(0, 255).astype(np.uint8)
+    (job_dir / "original.png").write_bytes(
+        cv2.imencode(".png", preview_u8)[1].tobytes()
+    )
+    return _public_asset_url(job_id, "original.png")
+
+
 def _post_file_with_retry(
     url: str,
     dicom_path: Path,
@@ -129,6 +146,11 @@ def _post_file_with_retry(
                 continue
 
             return resp
+        except requests.Timeout as e:
+            # The model server is already busy with this request; retrying would
+            # queue a second full inference behind its lock and multiply the wait.
+            last_exc = e
+            break
         except requests.RequestException as e:
             last_exc = e
             if attempt < retries:
@@ -199,11 +221,26 @@ def _infer_mask_from_api(
     return (mask_u8 > 0).astype(np.uint8)
 
 
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 ROOT = Path(__file__).resolve().parent
 UPLOAD_DIR = ROOT / "local_uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 SEGMENTATION_JOB_STORE: dict[str, dict[str, Any]] = {}
+
+_JOB_ID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _job_dir_or_raise(job_id: str) -> Path:
+    """Resolve a job id to its directory, rejecting anything that is not a UUID.
+
+    A job id like `..\\app.db` would resolve outside UPLOAD_DIR on Windows.
+    """
+    if not isinstance(job_id, str) or not _JOB_ID_PATTERN.fullmatch(job_id):
+        raise ValueError(f"Invalid job_id: {job_id!r}")
+    return UPLOAD_DIR / job_id
 
 
 def _public_asset_url(job_id: str, filename: str) -> str:
@@ -221,7 +258,7 @@ def _run_segmentation_job(
 ) -> dict[str, Any]:
     """Manual segmentation gate: this function is only called from the explicit API route."""
     if input_path is None:
-        input_path = next(iter(sorted((UPLOAD_DIR / job_id).glob("*.dcm"))), None)
+        input_path = next(iter(sorted(_job_dir_or_raise(job_id).glob("*.dcm"))), None)
     if input_path is None:
         raise FileNotFoundError(f"No DICOM file found for job_id={job_id}")
 
@@ -339,7 +376,10 @@ if FastAPI is not None:
         if not job_id:
             raise HTTPException(status_code=400, detail="jobId/requestId/analysisId is required")
 
-        job_dir = UPLOAD_DIR / job_id
+        try:
+            job_dir = _job_dir_or_raise(job_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid job id")
         if not job_dir.exists():
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -399,8 +439,8 @@ def main():
     ap.add_argument("--classification_api", required=True)
     ap.add_argument("--segmentation_api", required=True)
     ap.add_argument("--job_id", required=True)
-    ap.add_argument("--classification_timeout", type=float, default=30.0)
-    ap.add_argument("--segmentation_timeout", type=float, default=60.0)
+    ap.add_argument("--classification_timeout", type=float, default=600.0)
+    ap.add_argument("--segmentation_timeout", type=float, default=600.0)
     ap.add_argument("--retries", type=int, default=2)
     ap.add_argument("--retry_backoff", type=float, default=0.8)
     args = ap.parse_args()
@@ -445,6 +485,12 @@ def main():
         )
 
         if not has_cancer:
+            original_scan = ""
+            try:
+                original_scan = _render_original_preview(job_dir, request_id, input_path)
+            except Exception as preview_err:
+                print(f"[run_local_medsam_infer] preview render failed: {preview_err}")
+
             base_payload.update(
                 {
                     "malignancyScore": int(round(cls_conf * 100)),
@@ -456,7 +502,7 @@ def main():
                         "Segmentation skipped because classification result is negative.",
                         "Clinical review is recommended to confirm findings.",
                     ],
-                    "originalScan": "",
+                    "originalScan": original_scan,
                     "segmentationImages": [],
                 }
             )

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { apiUrl } from "@/lib/api";
 
 interface HistoryItem {
   jobId: string;
@@ -21,9 +22,7 @@ const History = () => {
   useEffect(() => {
     const loadHistory = async () => {
       try {
-        const res = await fetch(
-          `${import.meta.env.VITE_API_BASE_URL}/api/history`,
-        );
+        const res = await fetch(apiUrl("/api/history"));
         if (!res.ok) throw new Error(`History load failed: ${res.status}`);
 
         const data: HistoryItem[] = await res.json();
