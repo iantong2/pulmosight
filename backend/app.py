@@ -320,8 +320,189 @@ async def history_api():
     return payload
 
 
+_DEFAULT_ASSIGNED_SERVICE = "Respiratory Medicine"
+
+
+def _risk_level_for_score(score: float | None) -> str:
+    """Same bands the UI gauge uses, so the queue and the analysis agree."""
+    if score is None:
+        return "low"
+    if score >= 70:
+        return "high"
+    if score >= 30:
+        return "moderate"
+    return "low"
+
+
+def _read_job_json(job_dir: Path, name: str) -> dict[str, Any]:
+    path = job_dir / name
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _referral_payload(row: dict[str, Any]) -> dict[str, Any]:
+    job_id = row.get("job_id")
+    job_dir = UPLOAD_DIR / job_id if job_id else None
+    result_data = _read_job_json(job_dir, "result.json") if job_dir else {}
+    meta = _read_job_json(job_dir, "meta.json") if job_dir else {}
+    classification = result_data.get("classification") or {}
+
+    # The Analysis page reads /api/analysis/{job_id}, which does not persist.
+    # Fall back to the job files so a referral still carries the patient's age,
+    # gender and true classification even when no DB row was written yet.
+    age = row.get("age")
+    if age is None:
+        age = meta.get("age")
+    gender = row.get("gender")
+    if gender is None:
+        gender = meta.get("gender")
+
+    has_cancer = classification.get("has_cancer")
+    is_cancer = (
+        bool(has_cancer) if isinstance(has_cancer, bool) else bool(row.get("is_cancer"))
+    )
+
+    score = row.get("malignancy_score")
+    if score is None:
+        score = result_data.get("malignancyScore")
+
+    return {
+        "jobId": job_id,
+        "patientId": row.get("patient_id") or meta.get("patientId"),
+        "patientName": row.get("patient_name") or meta.get("patientName") or "Unknown",
+        "age": age,
+        "gender": gender,
+        "riskLevel": row.get("risk_level") or "low",
+        "malignancyScore": score,
+        "isCancer": is_cancer,
+        "confidence": row.get("confidence"),
+        "reason": row.get("reason") or "",
+        "assignedService": row.get("assigned_service") or _DEFAULT_ASSIGNED_SERVICE,
+        "status": row.get("status") or "pending",
+        "referredAt": row.get("referred_at"),
+        "acceptedAt": row.get("accepted_at"),
+        "originalScan": result_data.get("originalScan") or "",
+    }
+
+
+@app.post("/api/referrals")
+async def create_referral_api(payload: dict):
+    """Confirm an analysis and place the case in the physician referral queue.
+
+    Called by the "Confirm and refer to corresponding physicians" action. The
+    risk band is derived from the stored malignancy score so the queue order
+    cannot drift from what the analysis page showed.
+    """
+    job_id = payload.get("jobId") or payload.get("job_id")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="jobId is required")
+
+    job_dir = _resolve_job_dir(job_id)
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    result_data = _read_job_json(job_dir, "result.json")
+    meta = _read_job_json(job_dir, "meta.json")
+    detail = fetch_analysis_detail(job_id) or {}
+
+    score = result_data.get("malignancyScore")
+    if score is None:
+        score = detail.get("malignancy_score")
+    if score is None:
+        classification = result_data.get("classification") or {}
+        score = round(float(classification.get("confidence", 0.0)) * 100, 2)
+
+    patient_id = detail.get("patient_id") or meta.get("patientId") or ""
+    patient_name = (
+        detail.get("patient_name") or meta.get("patientName") or "Unknown"
+    )
+    is_cancer = bool(
+        (result_data.get("classification") or {}).get("has_cancer", False)
+    )
+
+    # The Analysis page loads /api/analysis/{job_id}, which does not write to
+    # SQLite. Persist the case here so the queue, history and detail views all
+    # describe the same analysis.
+    if patient_id and detail.get("job_id") is None:
+        upsert_patient(
+            patient_id,
+            patient_name,
+            meta.get("age"),
+            meta.get("gender"),
+        )
+        scan_file = next(iter(sorted(job_dir.glob("*.dcm"))), None)
+        upsert_scan_job(
+            job_id,
+            patient_id,
+            datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+            str(scan_file) if scan_file else None,
+        )
+        save_analysis_result(
+            job_id,
+            is_cancer,
+            float(score) if score is not None else None,
+            result_data.get("confidence"),
+        )
+
+    default_reason = (
+        "Suspicious lung nodule: radiology confirmed, awaiting physician review."
+        if is_cancer
+        else "Classification result flagged for physician review."
+    )
+
+    upsert_referral(
+        job_id=job_id,
+        patient_id=patient_id,
+        patient_name=patient_name,
+        risk_level=_risk_level_for_score(
+            float(score) if score is not None else None
+        ),
+        malignancy_score=float(score) if score is not None else None,
+        reason=payload.get("reason") or default_reason,
+        assigned_service=payload.get("assignedService") or _DEFAULT_ASSIGNED_SERVICE,
+    )
+
+    row = fetch_referral(job_id)
+    if row is None:  # pragma: no cover - only if the insert failed silently
+        raise HTTPException(status_code=500, detail="Could not create referral")
+    return _referral_payload(row)
+
+
+@app.get("/api/referrals")
+async def list_referrals_api():
+    """Referral queue for the physician portal, highest risk first."""
+    return [_referral_payload(row) for row in fetch_referrals()]
+
+
+@app.get("/api/referrals/{job_id}")
+async def referral_detail_api(job_id: str):
+    _resolve_job_dir(job_id)
+    row = fetch_referral(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Referral not found")
+    return _referral_payload(row)
+
+
+@app.post("/api/referrals/{job_id}/accept")
+async def accept_referral_api(job_id: str):
+    _resolve_job_dir(job_id)
+    if fetch_referral(job_id) is None:
+        raise HTTPException(status_code=404, detail="Referral not found")
+
+    accept_referral(job_id)
+    row = fetch_referral(job_id)
+    if row is None:  # pragma: no cover - row cannot vanish between statements
+        raise HTTPException(status_code=404, detail="Referral not found")
+    return _referral_payload(row)
+
+
 @app.get("/api/analysis/{job_id}")
 async def analysis_detail_api(job_id: str):
+    """Return the persisted result for a single job, suitable for the detail page route."""
     job_dir = _resolve_job_dir(job_id)
     result_path = _result_path(job_dir) if job_dir.exists() else None
     result_data: dict[str, Any] = {}

@@ -95,7 +95,7 @@ const Dashboard = () => {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="border-b border-border bg-card/50 backdrop-blur-xl sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="w-full px-6 py-4 flex items-center justify-between">
           <Logo />
 
           <div className="flex items-center gap-4">
@@ -105,6 +105,13 @@ const Dashboard = () => {
               onClick={() => navigate("/history")}
             >
               View History
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/referrals")}
+            >
+              Referral Queue
             </Button>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <User className="w-4 h-4" />

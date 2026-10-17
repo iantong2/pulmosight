@@ -4,6 +4,7 @@ import { CTScanViewer } from "@/components/CTScanViewer";
 import { MalignancyChart } from "@/components/MalignancyChart";
 import { MalignancyGauge } from "@/components/MalignancyGauge";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { AnalysisResult, Patient } from "@/types/patient";
 import { apiUrl, readErrorMessage } from "@/lib/api";
 import { ArrowLeft, Download, FileText, Layers, Loader2 } from "lucide-react";
@@ -72,10 +73,13 @@ const Analysis = () => {
   const patient = location.state?.patient as Patient | undefined;
   const routeJobId = location.state?.jobId as string | undefined;
   const cameFromHistory = location.state?.fromHistory === true;
+  const cameFromReferral = location.state?.fromReferral === true;
   const [showSegmentation, setShowSegmentation] = useState(false);
   const [showResultsModal, setShowResultsModal] = useState(false);
   const [isStartingSegmentation, setIsStartingSegmentation] = useState(false);
   const [referralConfirmed, setReferralConfirmed] = useState(false);
+  const [isReferring, setIsReferring] = useState(false);
+  const [elapsedSec, setElapsedSec] = useState(0);
 
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [segmentImages, setSegmentImages] = useState<string[]>([]);
@@ -248,6 +252,59 @@ const Analysis = () => {
     allowClassificationModalRef.current = false;
     setShowResultsModal(false);
   }, [jobId]);
+
+  // A referral outlives the page: if this case was already sent to a physician,
+  // keep the action in its confirmed state after a refresh instead of inviting
+  // a duplicate referral.
+  useEffect(() => {
+    if (!jobId) return;
+
+    let cancelled = false;
+
+    const loadReferralState = async () => {
+      try {
+        const res = await fetch(apiUrl(`/api/referrals/${jobId}`));
+        if (res.status === 404) {
+          if (!cancelled) setReferralConfirmed(false);
+          return;
+        }
+        if (!res.ok) return;
+
+        if (!cancelled) setReferralConfirmed(true);
+      } catch {
+        // Offline or transient failure: leave the action enabled so the user
+        // can still confirm the referral.
+      }
+    };
+
+    loadReferralState();
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId]);
+
+  // Live analysis clock. Classification takes tens of seconds and the backend
+  // only reports the stage it is in, so the elapsed time is what tells the user
+  // the job is still moving rather than stuck.
+  const pipelineRunning =
+    pipelineStage === "queued" ||
+    pipelineStage === "classifying" ||
+    pipelineStage === "segmenting";
+
+  useEffect(() => {
+    if (!pipelineRunning) {
+      setElapsedSec(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    setElapsedSec(0);
+    const timer = window.setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [pipelineRunning, pipelineStage]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -452,12 +509,51 @@ const Analysis = () => {
     });
   };
 
-  const handleConfirmReferral = () => {
-    setReferralConfirmed(true);
-    toast({
-      title: "Referred to corresponding physician",
-      description: "This analysis has been marked as confirmed.",
-    });
+  const handleConfirmReferral = async () => {
+    if (referralConfirmed) return;
+
+    if (!jobId) {
+      toast({
+        title: "Referral unavailable",
+        description: "This analysis is missing a valid job identifier.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsReferring(true);
+
+    try {
+      const response = await fetch(apiUrl("/api/referrals"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ jobId }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response, "Referral failed"));
+      }
+
+      setReferralConfirmed(true);
+      toast({
+        title: "Referred to corresponding physician",
+        description: "Opening the physician referral queue.",
+      });
+      navigate("/referrals");
+    } catch (error) {
+      toast({
+        title: "Referral failed",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Could not create the referral.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsReferring(false);
+    }
   };
 
   const classificationLabel = classification
@@ -474,6 +570,59 @@ const Analysis = () => {
       ? "Cancer detected by classification model."
       : "No cancer detected by classification model."
     : "Waiting for the classification model to finish evaluating this scan.";
+
+  // Progress checkpoints per stage. Inside a stage the bar creeps towards the
+  // next checkpoint using the elapsed time, but never crosses it before the
+  // backend reports the next stage — so the number stays an estimate.
+  const lastProgressRef = useRef(0);
+  const progressPercent = useMemo(() => {
+    const checkpoints: Record<
+      PipelineStage,
+      { base: number; cap: number; seconds: number }
+    > = {
+      idle: { base: 0, cap: 8, seconds: 30 },
+      queued: { base: 8, cap: 18, seconds: 20 },
+      classifying: { base: 18, cap: 62, seconds: 60 },
+      segmenting: { base: 62, cap: 92, seconds: 90 },
+      complete: { base: 100, cap: 100, seconds: 1 },
+      error: { base: 100, cap: 100, seconds: 1 },
+      cancelled: { base: 100, cap: 100, seconds: 1 },
+    };
+    const { base, cap, seconds } = checkpoints[pipelineStage];
+    const ratio = Math.min(1, elapsedSec / seconds);
+    return Math.round(base + (cap - base) * ratio);
+  }, [pipelineStage, elapsedSec]);
+
+  useEffect(() => {
+    if (pipelineRunning) lastProgressRef.current = progressPercent;
+  }, [pipelineRunning, progressPercent]);
+
+  // A failed or cancelled run keeps the bar where it stopped; jumping to 100%
+  // would suggest the analysis finished.
+  const displayedProgress =
+    pipelineStage === "error" || pipelineStage === "cancelled"
+      ? lastProgressRef.current
+      : progressPercent;
+
+  const formatElapsed = (totalSeconds: number) =>
+    `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(
+      totalSeconds % 60,
+    ).padStart(2, "0")}`;
+
+  const stageStepLabel =
+    pipelineStage === "classifying"
+      ? "Step 2 of 3 · Classifying scan"
+      : pipelineStage === "segmenting"
+        ? "Step 3 of 3 · Segmenting nodule regions"
+        : pipelineStage === "complete"
+          ? "Step 3 of 3 · Completed"
+          : pipelineStage === "queued"
+            ? "Step 1 of 3 · Preparing job"
+            : pipelineStage === "error"
+              ? "Analysis failed"
+              : pipelineStage === "cancelled"
+                ? "Analysis cancelled"
+                : "Waiting to start";
 
   const resultsModalTitle = classification?.has_cancer
     ? "Cancer indicators detected"
@@ -540,7 +689,7 @@ const Analysis = () => {
       <div className="min-h-screen bg-background">
         {/* Header */}
         <header className="border-b border-border bg-card/50 backdrop-blur-xl sticky top-0 z-50">
-          <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="w-full px-6 py-4 flex items-center justify-between">
             <Logo />
 
             <div className="flex items-center gap-4">
@@ -569,11 +718,21 @@ const Analysis = () => {
                 variant="outline"
                 size="sm"
                 onClick={() =>
-                  navigate(cameFromHistory ? "/history" : "/dashboard")
+                  navigate(
+                    cameFromReferral
+                      ? "/referrals"
+                      : cameFromHistory
+                        ? "/history"
+                        : "/dashboard",
+                  )
                 }
               >
                 <ArrowLeft className="w-4 h-4" />
-                {cameFromHistory ? "Back to History" : "Back to Dashboard"}
+                {cameFromReferral
+                  ? "Back to Referral Queue"
+                  : cameFromHistory
+                    ? "Back to History"
+                    : "Back to Dashboard"}
               </Button>
 
               <div>
@@ -609,16 +768,58 @@ const Analysis = () => {
           </div>
 
           <div className="mb-6 rounded-lg border border-border bg-card p-4">
-            <p className="text-sm text-muted-foreground">Pipeline Stage</p>
-            <p className="text-base font-medium text-foreground">
-              {stageMessage}
-            </p>
-            <p className="text-sm mt-1 text-muted-foreground">
-              Classification: {classificationLabel}
-            </p>
-            <p className="text-sm text-muted-foreground">
-              Confidence: {classificationConfidenceText}
-            </p>
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="text-sm text-muted-foreground">Pipeline Stage</p>
+                <p className="text-base font-medium text-foreground">
+                  {stageMessage}
+                </p>
+              </div>
+
+              <div className="text-right">
+                <p className="text-2xl font-semibold text-foreground">
+                  {displayedProgress}%
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {pipelineRunning
+                    ? `Elapsed ${formatElapsed(elapsedSec)}`
+                    : headerStatusText}
+                </p>
+              </div>
+            </div>
+
+            <Progress
+              value={displayedProgress}
+              className={`mt-3 h-2 ${
+                pipelineStage === "error"
+                  ? "[&>div]:bg-destructive"
+                  : pipelineStage === "complete"
+                    ? "[&>div]:bg-success"
+                    : ""
+              }`}
+            />
+
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span>{stageStepLabel}</span>
+              <span>
+                {pipelineRunning
+                  ? "Estimated progress — final time depends on server load"
+                  : ""}
+              </span>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-1">
+              <p className="text-sm text-muted-foreground">
+                Classification:{" "}
+                <span className="text-foreground">{classificationLabel}</span>
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Confidence:{" "}
+                <span className="text-foreground">
+                  {classificationConfidenceText}
+                </span>
+              </p>
+            </div>
             {errorMessage && (
               <div className="mt-3">
                 <p className="text-sm text-destructive">{errorMessage}</p>
@@ -721,11 +922,13 @@ const Analysis = () => {
                   <Button
                     className="sm:flex-1"
                     onClick={handleConfirmReferral}
-                    disabled={referralConfirmed}
+                    disabled={referralConfirmed || isReferring}
                   >
-                    {referralConfirmed
-                      ? "Referred to corresponding physician"
-                      : "Confirm and refer to corresponding physicians"}
+                    {isReferring
+                      ? "Referring..."
+                      : referralConfirmed
+                        ? "Referred to corresponding physician"
+                        : "Confirm and refer to corresponding physicians"}
                   </Button>
                 </div>
 
