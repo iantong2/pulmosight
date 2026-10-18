@@ -205,7 +205,10 @@ const ReferralQueue = () => {
         <aside className="hidden w-56 shrink-0 flex-col border-r border-border bg-[hsl(var(--sidebar-background))] lg:flex">
           <div className="border-b border-border px-5 py-5">
             <Logo />
-            <p className="mt-2 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            <p className="mt-2 text-[11px] font-medium uppercase tracking-[0.18em] text-primary">
+              Physician Portal
+            </p>
+            <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
               General Hospital
             </p>
           </div>
@@ -213,7 +216,13 @@ const ReferralQueue = () => {
           <nav className="flex-1 space-y-1 px-3 py-4">
             <button
               type="button"
-              onClick={() => navigate("/dashboard")}
+              onClick={() =>
+                toast({
+                  title: "Physician overview",
+                  description:
+                    "The overview dashboard is not available yet — the referral queue is the main screen.",
+                })
+              }
               className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition hover:bg-secondary hover:text-foreground"
             >
               <LayoutDashboard className="h-4 w-4" />
@@ -225,7 +234,13 @@ const ReferralQueue = () => {
             </div>
             <button
               type="button"
-              onClick={() => navigate("/history")}
+              onClick={() =>
+                toast({
+                  title: "Patients",
+                  description:
+                    "A physician patient list is not available yet — cases appear in the referral queue.",
+                })
+              }
               className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition hover:bg-secondary hover:text-foreground"
             >
               <Users className="h-4 w-4" />
@@ -262,12 +277,17 @@ const ReferralQueue = () => {
           {/* Top bar */}
           <header className="sticky top-0 z-40 border-b border-border bg-card/50 backdrop-blur-xl">
             <div className="flex items-center justify-between px-6 py-4">
-              <div className="lg:hidden">
-                <Logo />
+              <div className="flex items-center gap-3">
+                <div className="lg:hidden">
+                  <Logo />
+                </div>
+                <p className="hidden text-sm text-muted-foreground lg:block">
+                  PulmoSight General Hospital
+                </p>
+                <span className="rounded-full border border-primary/40 bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
+                  Physician Portal
+                </span>
               </div>
-              <p className="hidden text-sm text-muted-foreground lg:block">
-                PulmoSight General Hospital
-              </p>
 
               <div className="flex items-center gap-3 text-sm">
                 <span className="hidden rounded-full border border-border px-3 py-1 text-muted-foreground sm:inline">
@@ -279,7 +299,7 @@ const ReferralQueue = () => {
                   onClick={() => navigate("/dashboard")}
                 >
                   <ArrowLeft className="mr-1 h-4 w-4" />
-                  Dashboard
+                  Radiologist Portal
                 </Button>
               </div>
             </div>
@@ -351,7 +371,7 @@ const ReferralQueue = () => {
                         className="mt-4"
                         onClick={() => navigate("/dashboard")}
                       >
-                        Back to Dashboard
+                        Back to Radiologist Portal
                       </Button>
                     </div>
                   ) : (

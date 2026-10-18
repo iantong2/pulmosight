@@ -96,7 +96,12 @@ const Dashboard = () => {
       {/* Header */}
       <header className="border-b border-border bg-card/50 backdrop-blur-xl sticky top-0 z-50">
         <div className="w-full px-6 py-4 flex items-center justify-between">
-          <Logo />
+          <div className="flex items-center gap-3">
+            <Logo />
+            <span className="hidden rounded-full border border-border px-2.5 py-0.5 text-xs text-muted-foreground sm:inline">
+              Radiologist Portal
+            </span>
+          </div>
 
           <div className="flex items-center gap-4">
             <Button
@@ -109,9 +114,9 @@ const Dashboard = () => {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => navigate("/referrals")}
+              onClick={() => navigate("/physician/referrals")}
             >
-              Referral Queue
+              Physician Portal
             </Button>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <User className="w-4 h-4" />

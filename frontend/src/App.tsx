@@ -2,7 +2,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Analysis from "./pages/Analysis";
@@ -19,12 +19,23 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <Routes>
+          {/* Radiologist portal */}
           <Route path="/" element={<Login />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/history" element={<History />} />
-          <Route path="/referrals" element={<ReferralQueue />} />
           <Route path="/analysis/:jobId" element={<Analysis />} />
           <Route path="/analysis" element={<Analysis />} />
+          {/* Physician portal */}
+          <Route
+            path="/physician"
+            element={<Navigate to="/physician/referrals" replace />}
+          />
+          <Route path="/physician/referrals" element={<ReferralQueue />} />
+          {/* Old link kept so an existing bookmark lands in the right portal */}
+          <Route
+            path="/referrals"
+            element={<Navigate to="/physician/referrals" replace />}
+          />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>

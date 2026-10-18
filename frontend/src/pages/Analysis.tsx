@@ -539,9 +539,9 @@ const Analysis = () => {
       setReferralConfirmed(true);
       toast({
         title: "Referred to corresponding physician",
-        description: "Opening the physician referral queue.",
+        description: "Opening the Physician Portal referral queue.",
       });
-      navigate("/referrals");
+      navigate("/physician/referrals");
     } catch (error) {
       toast({
         title: "Referral failed",
@@ -690,7 +690,12 @@ const Analysis = () => {
         {/* Header */}
         <header className="border-b border-border bg-card/50 backdrop-blur-xl sticky top-0 z-50">
           <div className="w-full px-6 py-4 flex items-center justify-between">
-            <Logo />
+            <div className="flex items-center gap-3">
+              <Logo />
+              <span className="hidden rounded-full border border-border px-2.5 py-0.5 text-xs text-muted-foreground sm:inline">
+                Radiologist Portal
+              </span>
+            </div>
 
             <div className="flex items-center gap-4">
               {patient && (
@@ -720,7 +725,7 @@ const Analysis = () => {
                 onClick={() =>
                   navigate(
                     cameFromReferral
-                      ? "/referrals"
+                      ? "/physician/referrals"
                       : cameFromHistory
                         ? "/history"
                         : "/dashboard",
@@ -729,7 +734,7 @@ const Analysis = () => {
               >
                 <ArrowLeft className="w-4 h-4" />
                 {cameFromReferral
-                  ? "Back to Referral Queue"
+                  ? "Back to Physician Portal"
                   : cameFromHistory
                     ? "Back to History"
                     : "Back to Dashboard"}
