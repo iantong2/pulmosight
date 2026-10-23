@@ -936,32 +936,6 @@ const Analysis = () => {
                         : "Confirm and refer to corresponding physicians"}
                   </Button>
                 </div>
-
-                <div className="mt-4 bg-card border border-border rounded-lg p-4">
-                  <h3 className="text-sm font-medium text-foreground mb-3">
-                    Coordinate Legend
-                  </h3>
-                  <div className="space-y-2">
-                    {(result?.coordinates ?? []).map((coord, index) => (
-                      <div
-                        key={index}
-                        className="flex items-center justify-between text-sm"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="px-2 py-0.5 bg-destructive text-destructive-foreground text-xs rounded">
-                            {coord.label}
-                          </span>
-                          <span className="text-muted-foreground">
-                            Nodule {index + 1}
-                          </span>
-                        </div>
-                        <span className="text-foreground font-mono">
-                          ({coord.x}%, {coord.y}%)
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
               </div>
             </div>
           </div>

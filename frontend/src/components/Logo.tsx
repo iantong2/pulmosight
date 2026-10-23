@@ -10,7 +10,7 @@ export const Logo = () => {
         <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-success rounded-full border-2 border-background" />
       </div>
       <div className="flex flex-col">
-        <span className="text-xl font-semibold tracking-tight text-foreground">PulmoFlow</span>
+        <span className="text-xl font-semibold tracking-tight text-foreground">PulmoSight</span>
         <span className="text-xs text-muted-foreground tracking-wide uppercase">Healthcare System Portal</span>
       </div>
     </div>
