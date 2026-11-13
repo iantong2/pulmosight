@@ -6,6 +6,7 @@ import { MalignancyGauge } from "@/components/MalignancyGauge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { AnalysisResult, Patient } from "@/types/patient";
+import { RiskLevel } from "@/types/batch";
 import { apiUrl, readErrorMessage } from "@/lib/api";
 import { ArrowLeft, Download, FileText, Layers, Loader2 } from "lucide-react";
 import { useState, useEffect, useMemo, useRef } from "react";
@@ -78,6 +79,8 @@ const Analysis = () => {
   const [showResultsModal, setShowResultsModal] = useState(false);
   const [isStartingSegmentation, setIsStartingSegmentation] = useState(false);
   const [referralConfirmed, setReferralConfirmed] = useState(false);
+  const [humanReview, setHumanReview] = useState(false);
+  const [isRequestingHumanReview, setIsRequestingHumanReview] = useState(false);
   const [isReferring, setIsReferring] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
 
@@ -253,31 +256,27 @@ const Analysis = () => {
     setShowResultsModal(false);
   }, [jobId]);
 
-  // A referral outlives the page: if this case was already sent to a physician,
-  // keep the action in its confirmed state after a refresh instead of inviting
-  // a duplicate referral.
+  // A referral or a human-read request outlives the page: keep both actions in
+  // their confirmed state after a refresh instead of inviting a duplicate.
   useEffect(() => {
     if (!jobId) return;
 
     let cancelled = false;
 
-    const loadReferralState = async () => {
-      try {
-        const res = await fetch(apiUrl(`/api/referrals/${jobId}`));
-        if (res.status === 404) {
-          if (!cancelled) setReferralConfirmed(false);
-          return;
-        }
-        if (!res.ok) return;
+    const loadReviewState = async () => {
+      const [referralRes, humanReviewRes] = await Promise.all([
+        fetch(apiUrl(`/api/referrals/${jobId}`)).catch(() => null),
+        fetch(apiUrl(`/api/human-review/${jobId}`)).catch(() => null),
+      ]);
+      if (cancelled) return;
 
-        if (!cancelled) setReferralConfirmed(true);
-      } catch {
-        // Offline or transient failure: leave the action enabled so the user
-        // can still confirm the referral.
-      }
+      if (referralRes?.ok) setReferralConfirmed(true);
+      else if (referralRes?.status === 404) setReferralConfirmed(false);
+
+      setHumanReview(!!humanReviewRes?.ok);
     };
 
-    loadReferralState();
+    loadReviewState();
     return () => {
       cancelled = true;
     };
@@ -502,11 +501,47 @@ const Analysis = () => {
     }, 2000);
   };
 
-  const handleEditResult = () => {
-    toast({
-      title: "Edit result",
-      description: "Result editing is not available yet — nothing was changed.",
-    });
+  const handleRequireHumanAnalysis = async () => {
+    if (humanReview) return;
+
+    if (!jobId) {
+      toast({
+        title: "Human review unavailable",
+        description: "This analysis is missing a valid job identifier.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsRequestingHumanReview(true);
+    try {
+      const response = await fetch(apiUrl(`/api/human-review/${jobId}`), {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(
+          await readErrorMessage(response, "Could not request human analysis"),
+        );
+      }
+
+      // The backend also drops any existing referral for this case, so the
+      // physician queue no longer offers a machine-decided referral.
+      setHumanReview(true);
+      setReferralConfirmed(false);
+      toast({
+        title: "Human analysis requested",
+        description: "This case has been removed from the physician referral queue.",
+      });
+    } catch (err) {
+      toast({
+        title: "Request failed",
+        description:
+          err instanceof Error ? err.message : "Could not request human analysis.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsRequestingHumanReview(false);
+    }
   };
 
   const handleConfirmReferral = async () => {
@@ -537,11 +572,21 @@ const Analysis = () => {
       }
 
       setReferralConfirmed(true);
+      // Stay on the analysis. Navigating away here made a routine follow-up
+      // action look like the analysis page had sent the case on its own.
       toast({
         title: "Referred to corresponding physician",
-        description: "Opening the Physician Portal referral queue.",
+        description: "The case is now in the Physician Portal queue.",
+        action: (
+          <button
+            type="button"
+            className="whitespace-nowrap rounded-md border border-border px-3 py-1.5 text-xs font-medium"
+            onClick={() => navigate("/physician/referrals")}
+          >
+            Open queue
+          </button>
+        ),
       });
-      navigate("/physician/referrals");
     } catch (error) {
       toast({
         title: "Referral failed",
@@ -561,9 +606,17 @@ const Analysis = () => {
       (classification.has_cancer ? "malignant" : "benign"))
     : "pending";
 
-  const classificationConfidenceText = classification
-    ? `${Math.round(classification.confidence * 100)}%`
-    : "—";
+  // Same banding as the batch ranking: the classifier's verdict decides, so a
+  // malignant scan is never shown as low risk just because its score is small.
+  const riskLevel: RiskLevel = classification
+    ? classification.has_cancer
+      ? "high"
+      : "low"
+    : (result?.malignancyScore ?? 0) >= 70
+      ? "high"
+      : (result?.malignancyScore ?? 0) >= 30
+        ? "moderate"
+        : "low";
 
   const classificationSentence = classification
     ? classification.has_cancer
@@ -704,11 +757,6 @@ const Analysis = () => {
                   <span className="text-foreground font-medium">
                     {patient.name}
                   </span>
-                  <span className="text-border mx-2">|</span>
-                  ID:{" "}
-                  <span className="text-foreground font-medium">
-                    {patient.id}
-                  </span>
                 </div>
               )}
             </div>
@@ -818,12 +866,6 @@ const Analysis = () => {
                 Classification:{" "}
                 <span className="text-foreground">{classificationLabel}</span>
               </p>
-              <p className="text-sm text-muted-foreground">
-                Confidence:{" "}
-                <span className="text-foreground">
-                  {classificationConfidenceText}
-                </span>
-              </p>
             </div>
             {errorMessage && (
               <div className="mt-3">
@@ -900,6 +942,7 @@ const Analysis = () => {
                   <div className="mt-3 flex justify-center">
                     <MalignancyGauge
                       score={result?.malignancyScore ?? 0}
+                      riskLevel={riskLevel}
                     />
                   </div>
                 </div>
@@ -915,19 +958,29 @@ const Analysis = () => {
                   <p className="text-sm text-muted-foreground">
                     {classificationSentence}
                   </p>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    Confidence: {classificationConfidenceText}
-                  </p>
                 </div>
 
                 <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-                  <Button variant="outline" onClick={handleEditResult}>
-                    Edit result
+                  <Button
+                    variant="outline"
+                    onClick={handleRequireHumanAnalysis}
+                    disabled={humanReview || isRequestingHumanReview}
+                    title={
+                      humanReview
+                        ? "This case is flagged for a human read and is no longer in the referral queue"
+                        : "Flag this case for a human read and remove it from the referral queue"
+                    }
+                  >
+                    {isRequestingHumanReview
+                      ? "Requesting..."
+                      : humanReview
+                        ? "Human analysis requested"
+                        : "Require human analysis"}
                   </Button>
                   <Button
                     className="sm:flex-1"
                     onClick={handleConfirmReferral}
-                    disabled={referralConfirmed || isReferring}
+                    disabled={referralConfirmed || isReferring || humanReview}
                   >
                     {isReferring
                       ? "Referring..."

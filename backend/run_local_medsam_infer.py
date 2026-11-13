@@ -27,6 +27,7 @@ from medsam_segmentation_TRIAL2_auto_thr import (
     SAM_PIXEL_MEAN,
     SAM_PIXEL_STD,
 )
+from scoring import SCORE_VERSION, compute_malignancy_score, risk_level
 
 
 def _pick_device() -> torch.device:
@@ -248,6 +249,122 @@ def _public_asset_url(job_id: str, filename: str) -> str:
     return f"{PUBLIC_BASE_URL}{rel}" if PUBLIC_BASE_URL else rel
 
 
+def _segment_completed_job(
+    job_id: str,
+    input_path: Path,
+    segmentation_api: str,
+    segmentation_timeout: float,
+    retries: int,
+    retry_backoff: float,
+) -> dict[str, Any]:
+    """Run segmentation for a scan whose classification already came back positive.
+
+    In a batch run this is called for every positive scan right after its
+    classification, so the ranking on the results page can use the final
+    malignancy score without waiting for a second round of user clicks.
+    """
+    job_dir = input_path.parent
+    result_path = job_dir / "result.json"
+
+    try:
+        payload = {}
+        if result_path.exists():
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+
+        classification_result = payload.get("classification") or {}
+        if not bool(classification_result.get("has_cancer", False)):
+            raise RuntimeError("Segmentation is blocked for a negative classification result.")
+
+        _write_status_ex(job_dir, "running", stage="segmentation")
+
+        img01 = _read_dicom_to_img01(input_path)
+        seg_t0 = time.perf_counter()
+        mask_u8 = _infer_mask_from_api(
+            segmentation_api=segmentation_api,
+            dicom_path=input_path,
+            timeout_sec=segmentation_timeout,
+            retries=max(0, retries),
+            retry_backoff=max(0.0, retry_backoff),
+        )
+        seg_time = time.perf_counter() - seg_t0
+
+        h, w = mask_u8.shape
+        img_resized = cv2.resize(img01, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        original_name, mask_name, overlay_name = _save_outputs(job_dir, img_resized, mask_u8)
+
+        comps = _connected_components(mask_u8)
+        coords = []
+        for idx, (_, cx, cy) in enumerate(comps[:5], start=1):
+            coords.append(
+                {
+                    "x": round((cx / max(1.0, float(w))) * 100.0, 2),
+                    "y": round((cy / max(1.0, float(h))) * 100.0, 2),
+                    "label": f"N{idx}",
+                }
+            )
+
+        nodule_count = len(comps)
+        has_cancer = bool(classification_result.get("has_cancer", False))
+        cls_conf = float(classification_result.get("confidence", 0.0))
+        # The score is built from the classifier confidence, never from the
+        # nodule count alone — a positive scan with no candidate region must
+        # still outrank a confident negative one.
+        malignancy_score = compute_malignancy_score(
+            has_cancer, cls_conf, nodule_count, has_segmentation=True
+        )
+        confidence = int(round(cls_conf * 100))
+        findings = [
+            f"Detected {nodule_count} candidate nodule region(s).",
+            "Segmentation generated from remote model API.",
+            "Clinical review is recommended to confirm findings.",
+        ]
+
+        result_payload = {
+            "requestId": job_id,
+            "classification": {
+                "has_cancer": has_cancer,
+                "confidence": cls_conf,
+                "processing_time": float(classification_result.get("processing_time", 0.0)),
+                "label": classification_result.get("label"),
+                "threshold": classification_result.get("threshold"),
+            },
+            "segmentation": {
+                "processing_time": round(seg_time, 4),
+                "shape": [int(h), int(w)],
+                "maskUrl": _public_asset_url(job_id, mask_name),
+                "overlayUrl": _public_asset_url(job_id, overlay_name),
+            },
+            "malignancyScore": malignancy_score,
+            "confidence": confidence,
+            "riskLevel": risk_level(
+                has_cancer, malignancy_score, has_segmentation=True, nodule_count=nodule_count
+            ),
+            "scoreVersion": SCORE_VERSION,
+            "noduleCount": nodule_count,
+            "coordinates": coords,
+            "findings": findings,
+            "originalScan": _public_asset_url(job_id, original_name),
+            "segmentationImages": [
+                _public_asset_url(job_id, overlay_name),
+                _public_asset_url(job_id, mask_name),
+            ],
+        }
+        result_path.write_text(json.dumps(result_payload, ensure_ascii=False), encoding="utf-8")
+        _write_status_ex(job_dir, "completed", stage="completed")
+        SEGMENTATION_JOB_STORE[job_id] = {"status": "completed", "jobId": job_id, "result": result_payload}
+        return {"success": True, "jobId": job_id, "status": "completed", "result": result_payload}
+    except Exception as e:
+        err_msg = f"{type(e).__name__}: {e}"
+        print("[run_local_medsam_infer] segmentation error:")
+        print(traceback.format_exc())
+        _write_status_ex(job_dir, "failed", err_msg, stage="failed")
+        SEGMENTATION_JOB_STORE[job_id] = {"status": "failed", "jobId": job_id, "error": err_msg}
+        return {"success": False, "jobId": job_id, "status": "failed", "error": err_msg}
+
+
 def _run_segmentation_job(
     job_id: str,
     input_path: Path | None = None,
@@ -274,91 +391,14 @@ def _run_segmentation_job(
         except Exception:
             pass
 
-    try:
-        _write_status_ex(job_dir, "running", stage="segmentation")
-        payload = {}
-        if result_path.exists():
-            try:
-                payload = json.loads(result_path.read_text(encoding="utf-8"))
-            except Exception:
-                payload = {}
-
-        classification_result = payload.get("classification") or {}
-        if not bool(classification_result.get("has_cancer", False)):
-            raise RuntimeError("Segmentation is blocked for a negative classification result.")
-
-        img01 = _read_dicom_to_img01(input_path)
-        seg_t0 = time.perf_counter()
-        mask_u8 = _infer_mask_from_api(
-            segmentation_api=segmentation_api or os.getenv("SEGMENTATION_API_URL", "http://127.0.0.1:5001"),
-            dicom_path=input_path,
-            timeout_sec=segmentation_timeout,
-            retries=max(0, retries),
-            retry_backoff=max(0.0, retry_backoff),
-        )
-        seg_time = time.perf_counter() - seg_t0
-
-        h, w = mask_u8.shape
-        img_resized = cv2.resize(img01, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
-        original_name, mask_name, overlay_name = _save_outputs(job_dir, img_resized, mask_u8)
-
-        comps = _connected_components(mask_u8)
-        coords = []
-        for idx, (_, cx, cy) in enumerate(comps[:5], start=1):
-            coords.append(
-                {
-                    "x": round((cx / max(1.0, float(w))) * 100.0, 2),
-                    "y": round((cy / max(1.0, float(h))) * 100.0, 2),
-                    "label": f"N{idx}",
-                }
-            )
-
-        nodule_count = len(comps)
-        malignancy_score = min(99, 10 + nodule_count * 15)
-        confidence = 90 if nodule_count > 0 else 82
-        findings = [
-            f"Detected {nodule_count} candidate nodule region(s).",
-            "Segmentation generated from remote model API.",
-            "Clinical review is recommended to confirm findings.",
-        ]
-
-        result_payload = {
-            "requestId": job_id,
-            "classification": {
-                "has_cancer": bool(classification_result.get("has_cancer", False)),
-                "confidence": float(classification_result.get("confidence", 0.0)),
-                "processing_time": float(classification_result.get("processing_time", 0.0)),
-                "label": classification_result.get("label"),
-                "threshold": classification_result.get("threshold"),
-            },
-            "segmentation": {
-                "processing_time": round(seg_time, 4),
-                "shape": [int(h), int(w)],
-                "maskUrl": _public_asset_url(job_id, mask_name),
-                "overlayUrl": _public_asset_url(job_id, overlay_name),
-            },
-            "malignancyScore": malignancy_score,
-            "confidence": confidence,
-            "noduleCount": nodule_count,
-            "coordinates": coords,
-            "findings": findings,
-            "originalScan": _public_asset_url(job_id, original_name),
-            "segmentationImages": [
-                _public_asset_url(job_id, overlay_name),
-                _public_asset_url(job_id, mask_name),
-            ],
-        }
-        result_path.write_text(json.dumps(result_payload, ensure_ascii=False), encoding="utf-8")
-        _write_status_ex(job_dir, "completed", stage="completed")
-        SEGMENTATION_JOB_STORE[job_id] = {"status": "completed", "jobId": job_id, "result": result_payload}
-        return {"success": True, "jobId": job_id, "status": "completed", "result": result_payload}
-    except Exception as e:
-        err_msg = f"{type(e).__name__}: {e}"
-        print("[run_local_medsam_infer] segmentation error:")
-        print(traceback.format_exc())
-        _write_status_ex(job_dir, "failed", err_msg, stage="failed")
-        SEGMENTATION_JOB_STORE[job_id] = {"status": "failed", "jobId": job_id, "error": err_msg}
-        return {"success": False, "jobId": job_id, "status": "failed", "error": err_msg}
+    return _segment_completed_job(
+        job_id=job_id,
+        input_path=input_path,
+        segmentation_api=segmentation_api or os.getenv("SEGMENTATION_API_URL", "http://127.0.0.1:5001"),
+        segmentation_timeout=segmentation_timeout,
+        retries=retries,
+        retry_backoff=retry_backoff,
+    )
 
 
 if FastAPI is not None:
@@ -477,6 +517,10 @@ def main():
                 "threshold": cls_payload.get("threshold"),
             },
             "segmentation": None,
+            "malignancyScore": compute_malignancy_score(has_cancer, cls_conf),
+            "confidence": int(round(cls_conf * 100)),
+            "riskLevel": risk_level(has_cancer, compute_malignancy_score(has_cancer, cls_conf)),
+            "scoreVersion": SCORE_VERSION,
         }
 
         (job_dir / "result.json").write_text(
@@ -493,7 +537,7 @@ def main():
 
             base_payload.update(
                 {
-                    "malignancyScore": int(round(cls_conf * 100)),
+                    "malignancyScore": compute_malignancy_score(False, cls_conf),
                     "confidence": int(round(cls_conf * 100)),
                     "noduleCount": 0,
                     "coordinates": [],

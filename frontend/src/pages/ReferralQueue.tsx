@@ -430,15 +430,18 @@ const ReferralQueue = () => {
                                       ? "default"
                                       : "outline"
                                   }
+                                  title={
+                                    isAccepted
+                                      ? "Already accepted - open the case"
+                                      : "Review this case"
+                                  }
                                   onClick={(event) => {
                                     event.stopPropagation();
                                     setSelectedJobId(referral.jobId);
                                     openCase(referral);
                                   }}
                                 >
-                                  {index === 0 && !isAccepted
-                                    ? "Review Case"
-                                    : "Open"}
+                                  {isAccepted ? "Open case" : "Review case"}
                                 </Button>
                               </TableCell>
                             </TableRow>

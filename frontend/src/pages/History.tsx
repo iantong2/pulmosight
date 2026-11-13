@@ -134,7 +134,7 @@ const History = () => {
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <p className="text-sm text-muted-foreground">Patient</p>
+                      <p className="text-sm text-muted-foreground">Scan</p>
                       <h2 className="mt-1 text-xl font-semibold text-foreground">
                         {job.patientName || "Unknown Patient"}
                       </h2>
@@ -164,14 +164,6 @@ const History = () => {
                       <span>Malignancy</span>
                       <span className="text-foreground font-medium">
                         {score.toFixed(2)}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span>Confidence</span>
-                      <span className="text-foreground">
-                        {typeof job.confidence === "number"
-                          ? `${job.confidence.toFixed(2)}%`
-                          : "—"}
                       </span>
                     </div>
                   </div>

@@ -35,3 +35,6 @@ medsam_seg_fold2_last.pt
 .venv/
 
 app.db
+
+# Batch worker bookkeeping (locks, unit lists, logs) - not application data
+batch_state/

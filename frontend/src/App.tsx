@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Analysis from "./pages/Analysis";
+import BatchAnalysis from "./pages/BatchAnalysis";
 import History from "./pages/History";
 import ReferralQueue from "./pages/ReferralQueue";
 import NotFound from "./pages/NotFound";
@@ -23,6 +24,7 @@ const App = () => (
           <Route path="/" element={<Login />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/history" element={<History />} />
+          <Route path="/analysis/batch/:batchId" element={<BatchAnalysis />} />
           <Route path="/analysis/:jobId" element={<Analysis />} />
           <Route path="/analysis" element={<Analysis />} />
           {/* Physician portal */}
