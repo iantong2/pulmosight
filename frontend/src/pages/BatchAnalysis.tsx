@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Logo } from "@/components/Logo";
 import { ScanAnalysisPanel } from "@/components/ScanAnalysisPanel";
 import { ScanRanking } from "@/components/ScanRanking";
-import { rankScans, startSegmentation } from "@/lib/batch";
+import { activeScanId, rankScans, startSegmentation } from "@/lib/batch";
 import { Button } from "@/components/ui/button";
 import { useBatch } from "@/hooks/useBatch";
 import { apiUrl, readErrorMessage } from "@/lib/api";
@@ -30,17 +30,21 @@ const BatchAnalysis = () => {
     [scans],
   );
 
-  // Default to the highest-risk finished scan. Once the user picks a scan
-  // themselves the selection is never moved under them.
+  // Follow the pipeline while it runs: when a scan finishes, select the next
+  // one being processed so its progress bar is what the reader sees.
+  // The reader can still pick a scan by hand; once they do, the selection is
+  // theirs and a finished scan is not swapped out from under them.
   useEffect(() => {
-    if (userPickedRef.current || scans.length === 0) return;
+    if (scans.length === 0) return;
 
-    const ranked = rankScans(scans);
-    const topDone = ranked.find((scan) => scan.status === "completed");
-    const nextId = topDone?.jobId ?? ranked[0]?.jobId ?? null;
+    const nextId = userPickedRef.current
+      ? activeScanId(scans, selectedJobId)
+      : activeScanId(scans, null);
 
-    setSelectedJobId((prev) => (prev === nextId ? prev : nextId));
-  }, [scans]);
+    if (nextId) {
+      setSelectedJobId((prev) => (prev === nextId ? prev : nextId));
+    }
+  }, [scans, selectedJobId]);
 
   const selected = scans.find((scan) => scan.jobId === selectedJobId) ?? null;
 

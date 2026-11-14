@@ -63,6 +63,39 @@ export const rankScans = (scans: BatchScan[]): BatchScan[] => {
   });
 };
 
+/**
+ * Which scan the results page should focus on right now.
+ *
+ * While a run is going that is the scan being processed, so the progress bar on
+ * screen matches what the pipeline is doing instead of sitting at 100% on a
+ * finished scan. Before the worker has claimed anything the next queued scan is
+ * shown, which is the one it is about to start.
+ *
+ * Once nothing is running the reader's own pick is kept; with no pick at all the
+ * highest-ranked finished scan wins.
+ */
+export const activeScanId = (
+  scans: BatchScan[],
+  pinnedJobId: string | null,
+): string | null => {
+  if (scans.length === 0) return null;
+
+  const running = scans.find((scan) => scan.status === "running");
+  if (running) return running.jobId;
+
+  const pinned = pinnedJobId
+    ? (scans.find((scan) => scan.jobId === pinnedJobId) ?? null)
+    : null;
+  if (pinned) return pinned.jobId;
+
+  const queued = scans.find(
+    (scan) => scan.status === "pending" || scan.status === "cancelled",
+  );
+  if (queued) return queued.jobId;
+
+  return rankScans(scans)[0]?.jobId ?? null;
+};
+
 /** Fire the manual segmentation endpoint for a single scan. */
 export const startSegmentation = async (jobId: string): Promise<void> => {
   const response = await fetch(apiUrl("/api/segmentation/run"), {
